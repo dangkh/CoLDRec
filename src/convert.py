@@ -16,7 +16,7 @@ if __name__ == '__main__':
     train_path = os.path.join(data_dir, 'trn_mat.pkl')
     test_path = os.path.join(data_dir, 'tst_mat.pkl')
     valid_path = os.path.join(data_dir, 'val_mat.pkl')
-    output_path = os.path.join(data_dir, f'{args.dataset}.inter')
+    output_path = os.path.join(data_dir, f'{args.dataset}_cold.inter')
     assert os.path.exists(train_path), f"{train_path} does not exist."
     assert os.path.exists(test_path), f"{test_path} does not exist."    
     assert os.path.exists(valid_path), f"{valid_path} does not exist."
@@ -65,6 +65,15 @@ if __name__ == '__main__':
         rows, cols, data = to_coo_parts(m)
         parts.append((rows, cols, data, label))
 
+    # load colduser list
+    cold_user_path = os.path.join(data_dir, 'cold_users.pkl')
+    if os.path.exists(cold_user_path):
+        with open(cold_user_path, 'rb') as f:
+            cold_users = pickle.load(f)
+        print(f"Loaded {len(cold_users)} cold users from {cold_user_path}")
+    print(cold_users[:10])  # Print first 10 cold users for verification
+
+
     # Write merged .inter file. Timestamp is the sequential index of the row (interaction index).
     with open(output_path, 'w', encoding='utf-8') as fout:
         fout.write('userID\titemID\trating\ttimestamp\tx_label\n')
@@ -80,10 +89,18 @@ if __name__ == '__main__':
                 except Exception:
                     # default rating when unavailable
                     r = 1.0
+                if (label == 2) and (u in cold_users):
+                    # Skip test interactions for cold users
+                    continue
                 fout.write(f'{u}\t{v}\t{r}\t{idx}\t{label}\n')
                 idx += 1
 
-    print(f'Merged interactions written to: {output_path}')
+    # remove cold in original test file
+
+
+
+
+    # print(f'Merged interactions written to: {output_path}')
     
     # embed_path = os.path.join(data_dir, 'itm_emb_np.pkl')
     # assert os.path.exists(embed_path), f"{embed_path} does not exist."
