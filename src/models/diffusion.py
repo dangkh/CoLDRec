@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-
+import numpy as np
 
 class SinusoidalPositionEmbeddings(nn.Module):
     """Timestep embeddings for diffusion process"""
@@ -123,19 +123,34 @@ class ConditionalUNet(nn.Module):
         
         # Output
         return self.out(h)
-
+    
+def betas_from_linear_variance(steps, variance, max_beta=0.999):
+    alpha_bar = 1 - variance
+    betas = []
+    betas.append(1 - alpha_bar[0])
+    for i in range(1, steps):
+        betas.append(min(1 - alpha_bar[i] / alpha_bar[i - 1], max_beta))
+    return np.array(betas)
 
 class ConditionalDDPM:
     """
     Conditional Denoising Diffusion Probabilistic Model
     """
-    def __init__(self, model, T=10, beta_start=1e-4, beta_end=0.002, device='cuda'):
+    def __init__(self, model, T=10, beta_start=1e-4, beta_end=0.002, device='cuda', noiseScale = 1.0, schedule='linear'):
         self.model = model
         self.T = T
         self.device = device
+        self.noiseScale = noiseScale
         
         # Linear schedule for beta
-        self.betas = torch.linspace(beta_start, beta_end, T).to(device)
+        if schedule in ['linear', 'linear_var']:
+            start = self.noiseScale * beta_start
+            end = self.noiseScale * beta_end
+            self.betas = torch.linspace(start, end, T).to(device)
+            if schedule == 'linear_var':
+                self.betas = torch.tensor(betas_from_linear_variance(T, np.linspace(start, end, T)), dtype=torch.float32).to(device)
+        else:
+           raise ValueError(f"Unsupported noise schedule: {schedule}")
         self.alphas = 1.0 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
         self.alphas_cumprod_prev = F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0)

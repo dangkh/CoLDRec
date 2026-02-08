@@ -13,21 +13,29 @@ import json
 from helper import build_item_item_knn, get_itemDesc, getUser_Interaction
 
 
-def generate_summary(model, tokenizer, system_prompt, content):
+def get_message(system_prompt, content): 
 	messages = [
 		{"role": "system", "content": system_prompt},
 		{"role" : "user", "content" : content}
 	]
-	input_text = tokenizer.apply_chat_template(
-		messages,
-		tokenize = False,
-		add_generation_prompt = True, # Must add for generation
-		enable_thinking = False
-	)
+	return messages
+
+def generate_summary(model, tokenizer, batchInfo):
+	allMessages = []
+	for messages in batchInfo:
+		input_text = tokenizer.apply_chat_template(
+			messages,
+			tokenize = False,
+			add_generation_prompt = True, # Must add for generation
+			enable_thinking = True
+		)
+		allMessages.append(input_text)
+
 	inputs = tokenizer(
-		input_text,
+		allMessages,
 		return_tensors = "pt",
 		add_special_tokens = True,
+		padding=True,
 	).to("cuda")
 
 	output = model.generate(
@@ -36,14 +44,19 @@ def generate_summary(model, tokenizer, system_prompt, content):
 		temperature = 0.5, top_p = 0.95, top_k = 20, # For non thinking
 		do_sample = False
 	)
-	generated_tokens = output[0][inputs["input_ids"].shape[-1]:]
-	return tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+	generated_ids_trimmed = [
+    	out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, output)
+	]
+	output_texts = tokenizer.batch_decode(
+		generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+	)
+	return output_texts
 
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
 	parser.add_argument('--dataset', '-d', type=str, default='book', help='name of datasets')
 	parser.add_argument('--tuning',  '-t', type=bool, default=True, help='load tuned model or pretrain')
-	parser.add_argument('--LLM', type=str, default='06B', help='name of LLM to use: 06B, or 4B, 8B')
+	parser.add_argument('--LLM', type=str, default='Llama', help='name of LLM to use: Llama or Gemma, Qwen')
 	parser.add_argument("--shard", type=int, default=0)
 	parser.add_argument("--num_shards", type=int, default=1)
 	parser.add_argument("--out", type=str, default="sample_user_profile.json")
@@ -94,20 +107,23 @@ if __name__ == '__main__':
 
 
 	fourbit_models = [
+		"unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit", # Qwen 14B 2x faster
+		"unsloth/Qwen3-4B-Thinking-2507-unsloth-bnb-4bit",
 		"unsloth/Qwen3-8B-unsloth-bnb-4bit",
-		"unsloth/Qwen3-4B-Instruct-2507",
-		"unsloth/Qwen3-0.6B-unsloth-bnb-4bit",
+		"unsloth/Qwen3-14B-unsloth-bnb-4bit",
+		"unsloth/Qwen3-32B-unsloth-bnb-4bit",
+
+		# 4bit dynamic quants for superior accuracy and low memory use
+		"unsloth/gemma-3-12b-it-unsloth-bnb-4bit",
+		"unsloth/Phi-4",
+		"unsloth/Llama-3.1-8B",
+		"unsloth/Llama-3.2-3B",
+		"unsloth/orpheus-3b-0.1-ft-unsloth-bnb-4bit" # [NEW] We support TTS models!
 	] # More models at https://huggingface.co/unsloth
-	
+
+	selected_model = "unsloth/Qwen3-4B-Instruct-2507"
 	if args.tuning:
-		selected_model = f"./qwen{args.LLM}_it_model_{args.dataset}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}"
-	else:
-		if args.LLM == "06B":
-			selected_model = "unsloth/Qwen3-0.6B-unsloth-bnb-4bit"
-		elif args.LLM == "8B":
-			selected_model = "unsloth/Qwen3-8B-unsloth-bnb-4bit"
-		else:
-			selected_model = "unsloth/Qwen3-4B-Instruct-2507"
+		selected_model = f"./qwen4B_it_model_{args.dataset}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}"
 
 	print(selected_model)
 	
@@ -127,15 +143,15 @@ if __name__ == '__main__':
 	listUser = list(user_interactions.keys())
 	users = listUser[args.shard::args.num_shards]
 
-	if args.tuning:
-		user_profile_path = f'./data/{args.dataset}/tuning{args.LLM}_usr_prf_{args.shard}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}.json'
-	else:
-		user_profile_path = f'./data/{args.dataset}/{args.LLM}_usr_prf_{args.shard}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}.json'
-		
+	user_profile_path = f'./data/{args.dataset}/usr_prf_{args.shard}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}.json'
 	if os.path.exists(user_profile_path):
 		with open(user_profile_path, 'r', encoding='utf-8') as f:
 			user_profiles = json.load(f)
 		print(f"Loaded existing user profiles from {user_profile_path}, current size: {len(user_profiles)}")
+	q_message = []
+	q_id = []
+	batch_size = 16
+	batch_messages = []
 	for uid in tqdm(users):
 		if str(uid) in user_profiles:
 			continue
@@ -144,11 +160,37 @@ if __name__ == '__main__':
 		itemInfo = "The user has purchased: \n"
 		for item in u_items[-10:]:
 			itemInfo += itemDesc[item]
-		
-		summary = generate_summary(model, tokenizer, sys_prompt, itemInfo)
-		user_profiles[str(uid)] = { "summary": summary }
 
-		if (len(user_profiles) + 1) % 50 == 0:
+		messages = get_message(sys_prompt, itemInfo)
+		q_message.append(messages)
+		q_id.append(str(uid))
+		if len(q_message) >= batch_size:
+			batch_messages.append([q_id, q_message])
+			q_message = []
+			q_id = []
+	
+
+	if len(q_message) > 0:
+		batch_messages.append([q_id, q_message])
+		q_message = []
+		q_id = []
+		
+	# save batch_messages[0] to file text for debugging
+	with open(f'./data/{args.dataset}/batch_messages_{args.shard}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}.txt', 'w', encoding='utf-8') as f:
+		for uid, messages in zip(batch_messages[0][0], batch_messages[0][1]):
+			f.write(f"User ID: {uid}\n")
+			for msg in messages:
+				f.write(f"{msg['role']}: {msg['content']}\n")
+			f.write("\n====================\n\n")
+	
+
+	
+	for batchId, batchInfo in tqdm(batch_messages):
+		summary = generate_summary(model, tokenizer, batchInfo)
+		for i, uid in enumerate(batchId):
+			user_profiles[str(uid)] = { "summary": summary[i] }
+
+		if (len(user_profiles)) % (batch_size * 10) == 0:
 			with open(user_profile_path, 'w', encoding='utf-8') as f:
 				json.dump(user_profiles, f, ensure_ascii=False, indent=4)
 

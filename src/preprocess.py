@@ -28,6 +28,7 @@ if __name__ == '__main__':
 	parser.add_argument("--export_item", '-ei', type=bool, default=False, help='whether to export item data or not')
 	parser.add_argument('--prompt_profile', '-pp', type=bool, default=True, help='ablation: item profile in prompt or not')
 	parser.add_argument('--prompt_candidate', '-pc', type=bool, default=True, help='use candidate prompt or not')
+	parser.add_argument('--num_neg', '-n', type=int, default=3, help='number of negative samples for tuning')
 	args, _ = parser.parse_known_args()
 	print(args)
 	if args.user:
@@ -233,7 +234,8 @@ if __name__ == '__main__':
 			tuningP, systemP1, systemP2 = "tuning", "sys", "user"
 			if args.prompt_candidate:
 				tuningP, systemP1, systemP2 = "tuning_candidate", "sys_candidate", "user"
-			tun_prompt = all_prompts[args.dataset][tuningP]
+			tun_prompt1 = all_prompts[args.dataset]["tuning"]
+			tun_prompt2 = all_prompts[args.dataset]["tuning_candidate"]
 			sys_prompt1 = all_prompts[args.dataset][systemP1]
 			sys_prompt2 = all_prompts[args.dataset][systemP2]
 
@@ -264,7 +266,7 @@ if __name__ == '__main__':
 							continue
 						listC.append(c)
 					random.shuffle(listC)
-					listC = listC[:3]
+					listC = listC[:args.num_neg]
 					checkarray.append(len(listC))
 					candidateInfo = ""
 					# must add ground_truth to candidates
@@ -277,9 +279,13 @@ if __name__ == '__main__':
 							choose_def = f"Description: {description}\n"
 						tmp = f"Title: {title}\n{choose_def}\n"
 						candidateInfo += tmp
-					
-					userprompt = tun_prompt.format(itemInfo, candidateInfo)
+					if args.prompt_candidate:
+						userprompt = tun_prompt2.format(itemInfo, candidateInfo)
+					else:
+						userprompt = tun_prompt1.format(itemInfo, "")
 					answer = f"{itemDesc[ground_truth][0]}"
+					if answer == "":
+						continue
 					sys_prompt = sys_prompt1
 				else:
 					itemInfo = ""
@@ -290,7 +296,7 @@ if __name__ == '__main__':
 							choose_def = f"Description: {description}\n"
 						tmp = f"Title: {title}\n{choose_def}\n"
 						itemInfo += tmp
-					userprompt = tun_prompt.format(itemInfo, "")
+					userprompt = tun_prompt1.format(itemInfo, "")
 					sys_prompt = sys_prompt2
 					answer = str(sampleUser[str(uid)])
 
@@ -303,6 +309,6 @@ if __name__ == '__main__':
 
 			
 			dataset = Dataset.from_list(dataset)
-			dataset.to_json(f"./data/{args.dataset}/candidate_{args.prompt_candidate}_profile_{args.prompt_profile}_tuningData.jsonl")
+			dataset.to_json(f"./data/{args.dataset}/candidate_{args.prompt_candidate}_profile_{args.prompt_profile}_tuningData_{args.num_neg}.jsonl")
 			# stat for candidate
 			print(np.mean(checkarray), np.min(checkarray), np.max(checkarray))	
