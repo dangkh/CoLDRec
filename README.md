@@ -1,5 +1,5 @@
 # LLAUREC
-pytorch implementation for ""
+pytorch implementation for "**CoLDRec: Large Language Model Embeddings with Collaborative Filtering-Guided Diffusion for Recommendation**"
 
 ```
 VIRAL/
