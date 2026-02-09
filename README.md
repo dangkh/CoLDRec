@@ -1,5 +1,6 @@
 # LLAUREC
 pytorch implementation for "**CoLDRec: Large Language Model Embeddings with Collaborative Filtering-Guided Diffusion for Recommendation**"
+<img width="1651" height="1545" alt="pipeline2" src="https://github.com/user-attachments/assets/6051bfb4-4b8d-48d3-9c33-e4f96d2d6974" />
 
 ```
 VIRAL/
