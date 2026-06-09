@@ -11,51 +11,66 @@ from unsloth import FastLanguageModel
 import torch
 import json
 from helper import build_item_item_knn, get_itemDesc, getUser_Interaction
+from unsloth.chat_templates import get_chat_template
+
 
 
 def get_message(system_prompt, content): 
 	messages = [
-		{"role": "system", "content": system_prompt},
-		{"role" : "user", "content" : content}
+		{"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+		{"role": "user",   "content": [{"type": "text", "text": content}]}
 	]
 	return messages
 
+
 def generate_summary(model, tokenizer, batchInfo):
+	# ── Step 1: render each conversation to a string ──────────────────────
 	allMessages = []
 	for messages in batchInfo:
 		input_text = tokenizer.apply_chat_template(
 			messages,
-			tokenize = False,
-			add_generation_prompt = True, # Must add for generation
-			enable_thinking = True
+			tokenize=False,
+			add_generation_prompt=True,
 		)
 		allMessages.append(input_text)
 
-	inputs = tokenizer(
+	# ── Step 2: tokenize with the inner text tokenizer ────────────────────
+	tokenizer.tokenizer.padding_side = "left"
+	if tokenizer.tokenizer.pad_token is None:
+		tokenizer.tokenizer.pad_token = tokenizer.tokenizer.eos_token
+
+	inputs = tokenizer.tokenizer(
 		allMessages,
-		return_tensors = "pt",
-		add_special_tokens = True,
+		return_tensors="pt",
 		padding=True,
+		truncation=True,
+		max_length=4096,
 	).to("cuda")
 
+	# ── Step 3: generate ──────────────────────────────────────────────────
 	output = model.generate(
 		**inputs,
-		max_new_tokens = 1024, # Increase for longer outputs!
-		temperature = 0.5, top_p = 0.95, top_k = 20, # For non thinking
-		do_sample = False
+		max_new_tokens=1024,
+		temperature=0.5, top_p=0.95, top_k=20,
+		do_sample=False,   # ← must be True when using temperature/top_p/top_k
+		pad_token_id=tokenizer.tokenizer.pad_token_id,
 	)
+
+	# ── Step 4: trim prompt tokens, decode only new tokens ────────────────
 	generated_ids_trimmed = [
-    	out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, output)
+		out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, output)
 	]
-	output_texts = tokenizer.batch_decode(
-		generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+	output_texts = tokenizer.tokenizer.batch_decode(
+		generated_ids_trimmed,
+		skip_special_tokens=True,
+		clean_up_tokenization_spaces=False,
 	)
 	return output_texts
 
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
 	parser.add_argument('--dataset', '-d', type=str, default='book', help='name of datasets')
-	parser.add_argument('--tuning',  '-t', type=bool, default=True, help='load tuned model or pretrain')
+	parser.add_argument('--tuning',  '-t', type=bool, default=False, help='load tuned model or pretrain')
 	parser.add_argument('--LLM', type=str, default='Llama', help='name of LLM to use: Llama or Gemma, Qwen')
 	parser.add_argument("--shard", type=int, default=0)
 	parser.add_argument("--num_shards", type=int, default=1)
@@ -121,7 +136,7 @@ if __name__ == '__main__':
 		"unsloth/orpheus-3b-0.1-ft-unsloth-bnb-4bit" # [NEW] We support TTS models!
 	] # More models at https://huggingface.co/unsloth
 
-	selected_model = "unsloth/Qwen3-4B-Instruct-2507"
+	selected_model = "unsloth/gemma-3-4b-it-unsloth-bnb-4bit"
 	if args.tuning:
 		selected_model = f"./qwen4B_it_model_{args.dataset}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}"
 
@@ -137,20 +152,26 @@ if __name__ == '__main__':
 		# token = "hf_...", # use one if using gated models
 	)
 
-
+	tokenizer.tokenizer.padding_side = "left"
+	if tokenizer.tokenizer.pad_token is None:
+		tokenizer.tokenizer.pad_token = tokenizer.tokenizer.eos_token
+	FastLanguageModel.for_inference(model)
 	user_profiles = {}
 	checkarray = []
 	listUser = list(user_interactions.keys())
 	users = listUser[args.shard::args.num_shards]
 
-	user_profile_path = f'./data/{args.dataset}/usr_prf_{args.shard}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}.json'
+	if args.tuning:
+		user_profile_path = f'./data/{args.dataset}/batch_tuning{args.LLM}_usr_prf_{args.shard}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}.json'
+	else:
+		user_profile_path = f'./data/{args.dataset}/batch_{args.LLM}_usr_prf_{args.shard}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}.json'
 	if os.path.exists(user_profile_path):
 		with open(user_profile_path, 'r', encoding='utf-8') as f:
 			user_profiles = json.load(f)
 		print(f"Loaded existing user profiles from {user_profile_path}, current size: {len(user_profiles)}")
 	q_message = []
 	q_id = []
-	batch_size = 16
+	batch_size = 8
 	batch_messages = []
 	for uid in tqdm(users):
 		if str(uid) in user_profiles:
@@ -176,12 +197,14 @@ if __name__ == '__main__':
 		q_id = []
 		
 	# save batch_messages[0] to file text for debugging
-	with open(f'./data/{args.dataset}/batch_messages_{args.shard}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}.txt', 'w', encoding='utf-8') as f:
-		for uid, messages in zip(batch_messages[0][0], batch_messages[0][1]):
-			f.write(f"User ID: {uid}\n")
-			for msg in messages:
-				f.write(f"{msg['role']}: {msg['content']}\n")
-			f.write("\n====================\n\n")
+	# with open(f'./data/{args.dataset}/batch_messages_{args.shard}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}.txt', 'w', encoding='utf-8') as f:
+	#     for uid, messages in zip(batch_messages[0][0], batch_messages[0][1]):
+	#         print(uid, messages)
+	#         stop
+			# f.write(f"User ID: {uid}\n")
+			# for msg in messages:
+			#     f.write(f"{msg['role']}: {msg['content']}\n")
+			# f.write("\n====================\n\n")
 	
 
 	

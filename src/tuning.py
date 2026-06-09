@@ -31,7 +31,7 @@ def formatting_prompts_func(examples):
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
 	parser.add_argument('--dataset', '-d', type=str, default='book', help='name of datasets')
-	parser.add_argument('--LLM', type=str, default='06B', help='name of LLM to use: 06B, or 4B, 8B')
+	parser.add_argument('--LLM', type=str, default='4B', help='name of LLM to use: 4B')
 	parser.add_argument('--prompt_profile', '-pp', type=bool, default=True, help='ablation: item profile in prompt or not')
 	parser.add_argument('--prompt_candidate', '-pc', type=bool, default=True, help='use candidate prompt or not')
 	parser.add_argument('--num_neg', '-n', type=int, default=3, help='number of negative samples for tuning')
@@ -39,16 +39,10 @@ if __name__ == '__main__':
 	print(args)
 
 	fourbit_models = [
-		"unsloth/Qwen3-8B-unsloth-bnb-4bit",
-		"unsloth/Qwen3-4B-Instruct-2507",
-		"unsloth/Qwen3-0.6B-unsloth-bnb-4bit",
+		"unsloth/gemma-3-4b-it-unsloth-bnb-4bit",
 	] # More models at https://huggingface.co/unsloth
-	if args.LLM == "06B":
-		selected_model = "unsloth/Qwen3-0.6B-unsloth-bnb-4bit"
-	elif args.LLM == "8B":
-		selected_model = "unsloth/Qwen3-8B-unsloth-bnb-4bit"
-	else:
-		selected_model = "unsloth/Qwen3-4B-Instruct-2507"
+	selected_model = "unsloth/gemma-3-4b-it-unsloth-bnb-4bit"
+	model_output_dir = f"gemma3_4b_it_model_{args.dataset}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}"
 	model, tokenizer = FastLanguageModel.from_pretrained(
 		model_name = selected_model,
 		max_seq_length = 4096, # Choose any for long context!
@@ -86,11 +80,18 @@ if __name__ == '__main__':
 	dataset = load_dataset("json", data_files=dataPath)
 	datalist = []
 	for sample in dataset['train']:
+		conversations = []
+		system_prompt = (sample.get("systemprompt") or "").strip()
+		user_prompt = (sample.get("userprompt") or "").strip()
+		answer = (sample.get("answer") or "").strip()
+
+		if system_prompt:
+			conversations.append({"role": "system", "content": system_prompt})
+		conversations.append({"role": "user", "content": user_prompt})
+		conversations.append({"role": "assistant", "content": answer})
+
 		tmp = {
-			"conversations": [
-				{"role": "user", "content":  sample["systemprompt"] + sample["userprompt"]},
-				{"role": "assistant", "content": sample["answer"]},
-			]
+			"conversations": conversations
 		}
 		datalist.append(tmp)
 	# save 10 samples to check the format
@@ -98,11 +99,6 @@ if __name__ == '__main__':
 		json.dump(datalist[:10], f, ensure_ascii=False, indent=4)
 
 	dataset = Dataset.from_list(datalist)
-	from unsloth.chat_templates import get_chat_template
-	tokenizer = get_chat_template(
-		tokenizer,
-		chat_template = "qwen3-instruct",
-	)
 	from unsloth.chat_templates import standardize_data_formats
 	dataset = standardize_data_formats(dataset)
 	dataset = dataset.map(formatting_prompts_func, batched = True, num_proc=0)
@@ -132,12 +128,12 @@ if __name__ == '__main__':
 	)
 	trainer = train_on_responses_only(
 		trainer,
-		instruction_part = "<|im_start|>user\n",
-		response_part = "<|im_start|>assistant\n",
+		instruction_part = "<start_of_turn>user\n",
+		response_part = "<start_of_turn>model\n",
 	)
 	tokenizer.decode(trainer.train_dataset[100]["input_ids"])
 	tokenizer.decode([tokenizer.pad_token_id if x == -100 else x for x in trainer.train_dataset[100]["labels"]]).replace(tokenizer.pad_token, " ")				
 
 	trainer_stats = trainer.train()
-	model.save_pretrained(f"qwen{args.LLM}_it_model_{args.dataset}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}")  # Local saving
-	tokenizer.save_pretrained(f"qwen{args.LLM}_it_model_{args.dataset}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}")
+	model.save_pretrained(model_output_dir)  # Local saving
+	tokenizer.save_pretrained(model_output_dir)
