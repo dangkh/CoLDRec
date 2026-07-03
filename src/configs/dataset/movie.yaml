@@ -8,7 +8,7 @@ load_meta_cols: [itemID, description, title, category]
 inter_splitting_label: 'x_label'
 TEXT_ID_FIELD: description
 
-inter_file_name: 'steam.inter'
+inter_file_name: 'movie.inter'
 text_feature_file: 'text_feat.npy'
 user_feature_file: 'user_feat.npy'
 

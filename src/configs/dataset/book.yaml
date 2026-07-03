@@ -11,7 +11,6 @@ TEXT_ID_FIELD: description
 inter_file_name: 'book.inter'
 text_feature_file: 'text_feat.npy'
 user_feature_file: 'user_feat.npy'
-num_diffusion_steps: 5
 
 
 field_separator: "\t"

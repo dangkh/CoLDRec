@@ -48,7 +48,7 @@ class ConditionalUNet(nn.Module):
         
         # Down blocks (encoder)
         self.down1 = nn.Sequential(
-            nn.Linear(emb_dim + hidden_dim, hidden_dim),  # Input + text
+            nn.Linear(emb_dim + time_emb_dim + hidden_dim, hidden_dim),  # Input + text
             nn.LayerNorm(hidden_dim),
             nn.GELU()
         )
@@ -107,7 +107,7 @@ class ConditionalUNet(nn.Module):
         # ============================================
         # ENCODER (Downsampling)
         # ============================================
-        h1 = self.down1(torch.cat([x, text_cond], dim=-1))
+        h1 = self.down1(torch.cat([x, t_emb, text_cond], dim=-1))
         h2 = self.down2(torch.cat([h1, t_emb, text_cond], dim=-1))
         
         # ============================================
