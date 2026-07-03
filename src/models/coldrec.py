@@ -20,9 +20,9 @@ from torch.nn import MultiheadAttention
 from .diffusion import  ConditionalDDPM, ConditionalUNet
 from .transformer import TransformerEncoder
 
-class COLDREC(GeneralRecommender):
+class VLIF(GeneralRecommender):
     def __init__(self, config, dataset):
-        super(COLDREC, self).__init__(config, dataset)
+        super(VLIF, self).__init__(config, dataset)
 
         num_user = self.n_users
         num_item = self.n_items
