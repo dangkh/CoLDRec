@@ -20,9 +20,9 @@ from torch.nn import MultiheadAttention
 from .diffusion import  ConditionalDDPM, ConditionalUNet
 from .transformer import TransformerEncoder
 
-class VLIF(GeneralRecommender):
+class COLDREC(GeneralRecommender):
     def __init__(self, config, dataset):
-        super(VLIF, self).__init__(config, dataset)
+        super(COLDREC, self).__init__(config, dataset)
 
         num_user = self.n_users
         num_item = self.n_items
@@ -85,7 +85,7 @@ class VLIF(GeneralRecommender):
                 time_emb_dim= 8,
                 hidden_dim= self.feat_embed_dim * 2,
                 text_emb_dim= self.feat_embed_dim)
-            self.diffusion_model = ConditionalDDPM(self.unet, self.numStep, noiseScale=self.noise_scale, schedule=self.noise_schedule)
+            self.diffusion_model = ConditionalDDPM(self.unet, self.forwardSteps, noiseScale=self.noise_scale, schedule=self.noise_schedule)
             self.countE = 0
         elif config['fusion'] in ['add', 'pool']:
             pass
