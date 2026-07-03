@@ -48,8 +48,11 @@ class VLIF(GeneralRecommender):
         self.t_preference = None
         self.dim_latent = 64
         self.mm_adj = None
-        self.numStep = config['num_diffusion_steps']
         self.config = config
+        diffSteps = config['diffusion_steps']
+        self.forwardSteps = diffSteps[0]
+        self.inferSteps = diffSteps[1]
+        self.g_value = config['guidance_strength']
         self.noise_schedule = config['noise_schedule']
         self.noise_scale = config['noise_scale']
         dataset_path = os.path.abspath(config['data_path'] + config['dataset'])
@@ -67,43 +70,9 @@ class VLIF(GeneralRecommender):
         train_interactions = dataset.inter_matrix(form='coo').astype(np.float32)
         edge_index = self.pack_edge_index(train_interactions)
 
-
         self.edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous().to(self.device)
         self.edge_index = torch.cat((self.edge_index, self.edge_index[[1, 0]]), dim=1)
 
-        self.item_index = torch.zeros([self.num_item], dtype=torch.long)
-        index = []
-        for i in range(self.num_item):
-            self.item_index[i] = i
-            index.append(i)
-        self.drop_percent = self.drop_rate
-        self.single_percent = 1
-
-        drop_item = torch.tensor(
-            np.random.choice(self.item_index, int(self.num_item * self.drop_percent), replace=False))
-        drop_item_single = drop_item[:int(self.single_percent * len(drop_item))]
-
-        self.dropt_node_idx_single = drop_item_single[int(len(drop_item_single) * 2 / 3):]
-
-        self.dropt_node_idx = self.dropt_node_idx_single
-
-        mask_cnt = torch.zeros(self.num_item, dtype=int).tolist()
-        for edge in edge_index:
-            mask_cnt[edge[1] - self.num_user] += 1
-        mask_dropt = []
-        for idx, num in enumerate(mask_cnt):
-            temp_false = [False] * num
-            temp_true = [True] * num
-            mask_dropt.extend(temp_false) if idx in self.dropt_node_idx else mask_dropt.extend(temp_true)
-
-        edge_index = edge_index[np.lexsort(edge_index.T[1, None])]
-        edge_index_dropt = edge_index[mask_dropt]
-
-        self.edge_index_dropt = torch.tensor(edge_index_dropt).t().contiguous().to(self.device)
-
-        self.edge_index_dropt = torch.cat((self.edge_index_dropt, self.edge_index_dropt[[1, 0]]), dim=1)
-
-        self.t_drop_ze = torch.zeros(len(self.dropt_node_idx), self.t_feat.size(1)).to(self.device)
         self.t_gcn = GCN(self.dataset, batch_size, num_user, num_item, dim_x, self.aggr_mode,
                         num_layer=self.num_layer, has_feature=True, dropout=self.drop_rate, dim_latent=64,
                         device=self.device, features=self.t_feat, user_profile=self.user_feat)
@@ -113,7 +82,7 @@ class VLIF(GeneralRecommender):
         if config['fusion'] == 'diffusion':
             self.unet = ConditionalUNet(
                 emb_dim=self.feat_embed_dim,
-                time_emb_dim=self.feat_embed_dim,
+                time_emb_dim= 8,
                 hidden_dim= self.feat_embed_dim * 2,
                 text_emb_dim= self.feat_embed_dim)
             self.diffusion_model = ConditionalDDPM(self.unet, self.numStep, noiseScale=self.noise_scale, schedule=self.noise_schedule)
@@ -125,7 +94,8 @@ class VLIF(GeneralRecommender):
         elif config['fusion'] == 'Transformer':
             self.transformer = TransformerEncoder(64, num_heads= 4, layers=2)
         else:
-            raise NotImplementedError
+            print("*"*30)
+            print("No LLM Fusion")
         
 
 
@@ -169,7 +139,7 @@ class VLIF(GeneralRecommender):
         neg_item_nodes += self.n_users
 
         item_feat = self.mlp_item(self.t_feat)
-        user_feat = F.normalize(self.mlp_user(self.user_feat))
+        user_feat = F.normalize(self.mlp_user(self.user_feat)) # LLM generated user profiles
         
         self.t_rep, self.t_preference = self.t_gcn(self.edge_index, item_feat)
         self.id_rep, self.id_preference = self.id_gcn(self.edge_index, self.id_embedding.weight)
@@ -186,11 +156,11 @@ class VLIF(GeneralRecommender):
         if self.config['fusion'] == 'diffusion':
             self.lossD = self.diffusion_model.train_diff(user_feat, user_repT)
             generated_cid = self.diffusion_model.sample(
-                cid=user_feat,
-                text_emb=user_repT,
-                infer_step= 1,
+                cid=user_feat, # 
+                text_emb=user_repT, # condition signal
+                infer_step= self.inferSteps,
                 shape=user_repT.shape,
-                guidance_scale=5.0  # stronger guidance
+                guidance_scale=self.g_value  # stronger guidance
             )
             userRepT = user_repT + generated_cid
         elif self.config['fusion'] == 'add':
