@@ -82,10 +82,9 @@ if __name__ == '__main__':
 		conversations = []
 		system_prompt = (sample.get("systemprompt") or "").strip()
 		user_prompt = (sample.get("userprompt") or "").strip()
+		user_prompt = user_prompt + system_prompt
 		answer = (sample.get("answer") or "").strip()
 
-		if system_prompt:
-			conversations.append({"role": "system", "content": system_prompt})
 		conversations.append({"role": "user", "content": user_prompt})
 		conversations.append({"role": "assistant", "content": answer})
 
