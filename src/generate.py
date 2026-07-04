@@ -1,147 +1,198 @@
+from math import nan
+import pandas as pd
+from tqdm import tqdm
+import yaml
 import argparse
-import json
+import numpy as np
+from sklearn.neighbors import NearestNeighbors
 import os
 import random
-
-import numpy as np
-import pandas as pd
-import torch
-import yaml
-from tqdm import tqdm
 from unsloth import FastLanguageModel
-
-from helper import get_itemDesc, getUser_Interaction
-
-
-def get_message(system_prompt, content):
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": content},
-    ]
+import torch
+import json
+from helper import build_item_item_knn, get_itemDesc, getUser_Interaction
 
 
-def strip_qwen_thinking(text: str) -> str:
-    """
-    Safety cleanup in case Qwen still emits <think>...</think>.
-    """
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "0"):
+        return False
+    else:
+        raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+def clean_summary(text):
+    text = text.strip()
+
+    # Nếu Qwen vẫn sinh thinking block thì cắt bỏ
     if "</think>" in text:
-        text = text.split("</think>", 1)[-1]
-    return text.strip()
+        text = text.split("</think>", 1)[-1].strip()
+
+    # Bỏ markdown json wrapper nếu có
+    text = text.replace("```json", "").replace("```", "").strip()
+
+    return text
+
+
+def is_bad_summary(text):
+    text = text.strip()
+
+    if len(text) < 5:
+        return True
+
+    # Lỗi kiểu .*.*.*.*.*
+    if text.count(".*") > 10:
+        return True
+
+    # Lỗi sinh nhiều ký tự non-English bất thường
+    non_ascii_ratio = sum(ord(c) > 127 for c in text) / max(len(text), 1)
+    if non_ascii_ratio > 0.4:
+        return True
+
+    # Chuỗi dài nhưng gần như không có space, thường là lặp token
+    if len(text) > 300 and text.count(" ") < 10:
+        return True
+
+    return False
 
 
 @torch.inference_mode()
-def generate_summary(
+def generate_summary_batch(
     model,
     tokenizer,
-    batch_messages,
-    max_new_tokens=512,
-    enable_thinking=False,
+    system_prompt,
+    batch_contents,
+    max_new_tokens=1024,
+    do_sample=False,
 ):
-    all_prompts = []
+    batch_inputs_text = []
 
-    for messages in batch_messages:
+    for content in batch_contents:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content},
+        ]
+
         input_text = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=enable_thinking,
+            enable_thinking=False,
         )
-        all_prompts.append(input_text)
+
+        batch_inputs_text.append(input_text)
+
+    # RẤT QUAN TRỌNG với Qwen/Llama/Gemma khi batch generation
+    tokenizer.padding_side = "left"
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     inputs = tokenizer(
-        all_prompts,
+        batch_inputs_text,
         return_tensors="pt",
         padding=True,
-        truncation=True,
-        max_length=4096,
-        add_special_tokens=False,
-    )
+        add_special_tokens=True,
+    ).to("cuda")
 
-    device = next(model.parameters()).device
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-
-    generation_kwargs = {
-        "max_new_tokens": max_new_tokens,
-        "eos_token_id": tokenizer.eos_token_id,
-        "pad_token_id": tokenizer.pad_token_id,
-        "use_cache": True,
-    }
-
-    if enable_thinking:
-        # Qwen3 docs recommend sampling for thinking mode.
-        generation_kwargs.update(
-            {
-                "do_sample": True,
-                "temperature": 0.6,
-                "top_p": 0.95,
-                "top_k": 20,
-            }
-        )
-    else:
-        # For profile generation, deterministic output is usually better.
-        generation_kwargs.update(
-            {
-                "do_sample": False,
-            }
-        )
-
-    outputs = model.generate(
+    output = model.generate(
         **inputs,
-        **generation_kwargs,
+        max_new_tokens=max_new_tokens,
+        temperature=0.5,
+        top_p=0.95,
+        top_k=20,
+        do_sample=do_sample,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.pad_token_id,
+        use_cache=True,
     )
 
-    generated_ids_trimmed = [
-        out_ids[len(in_ids):]
-        for in_ids, out_ids in zip(inputs["input_ids"], outputs)
-    ]
+    # Với left-padding, toàn bộ input batch có cùng chiều dài.
+    # Generate output = padded_input + generated_tokens.
+    prompt_len = inputs["input_ids"].shape[-1]
+    generated_tokens = output[:, prompt_len:]
 
-    output_texts = tokenizer.batch_decode(
-        generated_ids_trimmed,
+    summaries = tokenizer.batch_decode(
+        generated_tokens,
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
     )
 
-    return [strip_qwen_thinking(x) for x in output_texts]
+    summaries = [clean_summary(s) for s in summaries]
+    return summaries
 
 
-def save_json_atomic(data, path):
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-    os.replace(tmp_path, path)
+@torch.inference_mode()
+def generate_summary_single(
+    model,
+    tokenizer,
+    system_prompt,
+    content,
+    max_new_tokens=512,
+):
+    """
+    Dùng để retry khi một sample trong batch bị lỗi.
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": content},
+    ]
+
+    input_text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+    inputs = tokenizer(
+        input_text,
+        return_tensors="pt",
+        add_special_tokens=True,
+    ).to("cuda")
+
+    output = model.generate(
+        **inputs,
+        max_new_tokens=max_new_tokens,
+        temperature=0.5,
+        top_p=0.95,
+        top_k=20,
+        do_sample=False,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.pad_token_id,
+        use_cache=True,
+    )
+
+    generated_tokens = output[0][inputs["input_ids"].shape[-1]:]
+    summary = tokenizer.decode(
+        generated_tokens,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
+
+    return clean_summary(summary)
 
 
-def main():
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--dataset", "-d", type=str, default="book")
-    parser.add_argument("--tuning", "-t", action=argparse.BooleanOptionalAction, default=True)
-
-    parser.add_argument(
-        "--model_name",
-        type=str,
-        default="unsloth/Qwen3-0.6B-unsloth-bnb-4bit",
-        help="Base Qwen 0.6B model from Unsloth.",
-    )
-    parser.add_argument(
-        "--tuned_model_path",
-        type=str,
-        default=None,
-        help="Path to your tuned Qwen 0.6B model. Used when --tuning is enabled.",
-    )
+    parser.add_argument("--dataset", "-d", type=str, default="book", help="name of datasets")
+    parser.add_argument("--tuning", "-t", type=str2bool, default=False, help="load tuned model or pretrain")
+    parser.add_argument("--LLM", type=str, default="06B", help="name of LLM to use: 06B, 4B, or 8B")
 
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--num_shards", type=int, default=1)
     parser.add_argument("--out", type=str, default=None)
 
-    parser.add_argument("--prompt_profile", "-pp", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--prompt_candidate", "-pc", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--prompt_profile", "-pp", type=str2bool, default=True)
+    parser.add_argument("--prompt_candidate", "-pc", type=str2bool, default=True)
 
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--max_seq_length", type=int, default=4096)
-    parser.add_argument("--max_new_tokens", type=int, default=512)
+    parser.add_argument("--max_new_tokens", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=3407)
-    parser.add_argument("--enable_thinking", action=argparse.BooleanOptionalAction, default=False)
 
     args, _ = parser.parse_known_args()
     print(args)
@@ -151,30 +202,32 @@ def main():
     torch.manual_seed(args.seed)
 
     # =========================
-    # Load metadata
+    # Load meta data
     # =========================
     meta_path = f"./data/{args.dataset}/fullMeta_{args.dataset}.csv"
-    inter_path = f"./data/{args.dataset}/{args.dataset}.inter"
-
     metaDF = pd.read_csv(meta_path)
+    metaDF = pd.DataFrame(metaDF)
+
     unique_meta_asin = set(metaDF["asin"])
     print(f"[Meta] Unique ASINs: {len(unique_meta_asin)}")
 
+    inter_path = f"./data/{args.dataset}/{args.dataset}.inter"
     interDF = pd.read_csv(
         inter_path,
         sep="\t",
         usecols=["userID", "itemID", "x_label"],
     )
+
     interDF["userID"] = interDF["userID"].astype(int)
     interDF["itemID"] = interDF["itemID"].astype(int)
 
     # =========================
-    # Prepare users
+    # Preparing for users
     # =========================
     user_interactions = getUser_Interaction(interDF)
 
     # =========================
-    # Load prompts
+    # Profiling prompt
     # =========================
     with open("src/prompts.yaml", "r", encoding="utf-8") as f:
         all_prompts = yaml.safe_load(f)
@@ -183,28 +236,47 @@ def main():
     itemDesc = get_itemDesc(metaDF)
 
     # =========================
-    # Load Qwen 0.6B
+    # Load item-item KNN nếu vẫn cần check file
+    # =========================
+    top_k = 10
+    item_item_path = f"./data/{args.dataset}/item_top{top_k}item.npy"
+
+    if os.path.exists(item_item_path):
+        print(f"{item_item_path} exists, skip building item-item knn.")
+        item_kitem = np.load(item_item_path)
+    else:
+        raise ValueError(
+            f"{item_item_path} does not exist, please run preprocess.py to build it."
+        )
+
+    # =========================
+    # Select model
     # =========================
     if args.tuning:
-        selected_model = args.tuned_model_path
-        if selected_model is None:
-            selected_model = (
-                f"./qwen0_6B_it_model_{args.dataset}"
-                f"_candidate_{args.prompt_candidate}"
-                f"_profile_{args.prompt_profile}"
-            )
+        selected_model = (
+            f"./qwen{args.LLM}_it_model_{args.dataset}"
+            f"_candidate_{args.prompt_candidate}"
+            f"_profile_{args.prompt_profile}"
+        )
     else:
-        selected_model = args.model_name
+        if args.LLM == "06B":
+            selected_model = "unsloth/Qwen3-0.6B-unsloth-bnb-4bit"
+        elif args.LLM == "8B":
+            selected_model = "unsloth/Qwen3-8B-unsloth-bnb-4bit"
+        elif args.LLM == "4B":
+            selected_model = "unsloth/Qwen3-4B-Instruct-2507"
+        else:
+            raise ValueError(f"Unknown LLM: {args.LLM}")
 
-    print(f"[Model] Loading: {selected_model}")
+    print(f"[Model] {selected_model}")
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=selected_model,
-        max_seq_length=args.max_seq_length,
+        max_seq_length=4096,
         load_in_4bit=True,
         load_in_8bit=False,
         full_finetuning=False,
-        device_map="auto",
+        device_map="balanced",
     )
 
     FastLanguageModel.for_inference(model)
@@ -220,105 +292,121 @@ def main():
     if args.out is not None:
         user_profile_path = args.out
     else:
-        user_profile_path = (
-            f"./data/{args.dataset}/usr_prf_qwen0_6B_{args.shard}"
-            f"_candidate_{args.prompt_candidate}"
-            f"_profile_{args.prompt_profile}.json"
-        )
+        if args.tuning:
+            user_profile_path = (
+                f"./data/{args.dataset}/tuning{args.LLM}_usr_prf_{args.shard}"
+                f"_candidate_{args.prompt_candidate}"
+                f"_profile_{args.prompt_profile}.json"
+            )
+        else:
+            user_profile_path = (
+                f"./data/{args.dataset}/{args.LLM}_usr_prf_{args.shard}"
+                f"_candidate_{args.prompt_candidate}"
+                f"_profile_{args.prompt_profile}.json"
+            )
 
     user_profiles = {}
+
     if os.path.exists(user_profile_path):
         with open(user_profile_path, "r", encoding="utf-8") as f:
             user_profiles = json.load(f)
+
         print(
-            f"[Resume] Loaded existing user profiles from {user_profile_path}, "
+            f"Loaded existing user profiles from {user_profile_path}, "
             f"current size: {len(user_profiles)}"
         )
 
     # =========================
-    # Build batches
+    # Prepare user list
     # =========================
-    list_users = list(user_interactions.keys())
-    users = list_users[args.shard::args.num_shards]
+    listUser = list(user_interactions.keys())
+    users = listUser[args.shard::args.num_shards]
 
-    batch_messages = []
-    q_ids = []
-    q_messages = []
+    pending_uids = []
+    pending_contents = []
 
+    # dùng rng riêng để shuffle reproducible
     rng = random.Random(args.seed + args.shard)
 
-    for uid in tqdm(users, desc="Building prompts"):
+    # =========================
+    # Batch generation
+    # =========================
+    for uid in tqdm(users):
         if str(uid) in user_profiles:
             continue
 
         u_items = list(user_interactions[uid])
         rng.shuffle(u_items)
 
-        item_info = "The user has purchased the following items:\n"
+        itemInfo = "The user has purchased: \n"
 
         for item in u_items[-10:]:
-            if item in itemDesc:
-                item_info += str(itemDesc[item]).strip() + "\n"
+            itemInfo += str(itemDesc[item][0]).strip() + "\n"
 
-        messages = get_message(sys_prompt, item_info)
-        q_ids.append(str(uid))
-        q_messages.append(messages)
+        pending_uids.append(str(uid))
+        pending_contents.append(itemInfo)
 
-        if len(q_messages) >= args.batch_size:
-            batch_messages.append((q_ids, q_messages))
-            q_ids = []
-            q_messages = []
+        if len(pending_contents) >= args.batch_size:
+            summaries = generate_summary_batch(
+                model=model,
+                tokenizer=tokenizer,
+                system_prompt=sys_prompt,
+                batch_contents=pending_contents,
+                max_new_tokens=args.max_new_tokens,
+                do_sample=False,
+            )
 
-    if len(q_messages) > 0:
-        batch_messages.append((q_ids, q_messages))
+            # Retry các output lỗi bằng single generation
+            for i, summary in enumerate(summaries):
+                if is_bad_summary(summary):
+                    print(f"[Retry] Bad summary for user {pending_uids[i]}")
+                    summary = generate_summary_single(
+                        model=model,
+                        tokenizer=tokenizer,
+                        system_prompt=sys_prompt,
+                        content=pending_contents[i],
+                        max_new_tokens=512,
+                    )
 
-    print(f"[Batch] Number of batches: {len(batch_messages)}")
+                user_profiles[pending_uids[i]] = {"summary": summary}
 
-    # =========================
-    # Save first batch for debugging
-    # =========================
-    if len(batch_messages) > 0:
-        debug_path = (
-            f"./data/{args.dataset}/batch_messages_qwen0_6B_{args.shard}"
-            f"_candidate_{args.prompt_candidate}"
-            f"_profile_{args.prompt_profile}.txt"
-        )
+            pending_uids = []
+            pending_contents = []
 
-        with open(debug_path, "w", encoding="utf-8") as f:
-            first_ids, first_messages = batch_messages[0]
-
-            for uid, messages in zip(first_ids, first_messages):
-                f.write(f"User ID: {uid}\n")
-                for msg in messages:
-                    f.write(f"{msg['role']}: {msg['content']}\n")
-                f.write("\n====================\n\n")
-
-        print(f"[Debug] Saved first batch to {debug_path}")
+            if len(user_profiles) % 50 == 0:
+                with open(user_profile_path, "w", encoding="utf-8") as f:
+                    json.dump(user_profiles, f, ensure_ascii=False, indent=4)
 
     # =========================
-    # Generate profiles
+    # Process remaining users
     # =========================
-    for batch_idx, (batch_ids, batch_info) in enumerate(
-        tqdm(batch_messages, desc="Generating profiles")
-    ):
-        summaries = generate_summary(
+    if len(pending_contents) > 0:
+        summaries = generate_summary_batch(
             model=model,
             tokenizer=tokenizer,
-            batch_messages=batch_info,
+            system_prompt=sys_prompt,
+            batch_contents=pending_contents,
             max_new_tokens=args.max_new_tokens,
-            enable_thinking=args.enable_thinking,
+            do_sample=False,
         )
 
-        for uid, summary in zip(batch_ids, summaries):
-            user_profiles[str(uid)] = {"summary": summary}
+        for i, summary in enumerate(summaries):
+            if is_bad_summary(summary):
+                print(f"[Retry] Bad summary for user {pending_uids[i]}")
+                summary = generate_summary_single(
+                    model=model,
+                    tokenizer=tokenizer,
+                    system_prompt=sys_prompt,
+                    content=pending_contents[i],
+                    max_new_tokens=512,
+                )
 
-        if (batch_idx + 1) % 10 == 0:
-            save_json_atomic(user_profiles, user_profile_path)
-            print(f"[Save] Saved {len(user_profiles)} profiles to {user_profile_path}")
+            user_profiles[pending_uids[i]] = {"summary": summary}
 
-    save_json_atomic(user_profiles, user_profile_path)
-    print(f"[Done] Saved {len(user_profiles)} profiles to {user_profile_path}")
+    # =========================
+    # Final save
+    # =========================
+    with open(user_profile_path, "w", encoding="utf-8") as f:
+        json.dump(user_profiles, f, ensure_ascii=False, indent=4)
 
-
-if __name__ == "__main__":
-    main()
+    print(f"[Done] Saved {len(user_profiles)} user profiles to {user_profile_path}")
