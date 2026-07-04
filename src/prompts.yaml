@@ -15,7 +15,7 @@ book:
 
     Requirements:
       1. Based on the PURCHASED ITEMS, summarize what types of books this user is likely to enjoy
-      2. Based on the summarization of user favorite, PROVIDE the most suitable candidate item for the user that they may choose to buy next.
+      2. Based on the summarization of user favorite, PROVIDE the most suitable candidate item for the user that they may choose to buy.
   sys: |
     You will serve as an assistant to help me determine which types of books a specific user is likely to enjoy.
     I will provide you with information about books that the user has purchased, as well as a list of books that they may choose to buy next.
@@ -31,7 +31,7 @@ book:
 
     Requirements:
       1. Based on the PURCHASED ITEMS, summarize what types of books this user is likely to enjoy
-      2. Based on the summarization of user favorite, PROVIDE the most suitable item for the user that they may choose to buy next.
+      2. Based on the summarization of user favorite, PROVIDE the most suitable item for the user that they may choose to buy.
   user: |
     You will serve as an assistant to help me determine which types of books a specific user is likely to enjoy.
     I will provide you with information about books that the user has purchased.
