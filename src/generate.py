@@ -138,7 +138,7 @@ if __name__ == '__main__':
 
 	selected_model = "unsloth/gemma-3-4b-it-unsloth-bnb-4bit"
 	if args.tuning:
-		selected_model = f"./qwen4B_it_model_{args.dataset}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}"
+		selected_model = f"./gemma3_4b_it_model_{args.dataset}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}"
 
 	print(selected_model)
 	
