@@ -17,8 +17,8 @@ from unsloth.chat_templates import get_chat_template
 
 def get_message(system_prompt, content): 
 	messages = [
-		{"role": "system", "content": [{"type": "text", "text": system_prompt}]},
-		{"role": "user",   "content": [{"type": "text", "text": content}]}
+		# {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+		{"role": "user",   "content": [{"type": "text", "text": system_prompt + content + "\n Now, provide the information of user in JSON format."}]}
 	]
 	return messages
 
@@ -51,7 +51,7 @@ def generate_summary(model, tokenizer, batchInfo):
 	output = model.generate(
 		**inputs,
 		max_new_tokens=1024,
-		temperature=0.5, top_p=0.95, top_k=20,
+		# temperature=0.5, top_p=0.95, top_k=20,
 		do_sample=False,   # ← must be True when using temperature/top_p/top_k
 		pad_token_id=tokenizer.tokenizer.pad_token_id,
 	)
@@ -122,19 +122,9 @@ if __name__ == '__main__':
 
 
 	fourbit_models = [
-		"unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit", # Qwen 14B 2x faster
-		"unsloth/Qwen3-4B-Thinking-2507-unsloth-bnb-4bit",
-		"unsloth/Qwen3-8B-unsloth-bnb-4bit",
-		"unsloth/Qwen3-14B-unsloth-bnb-4bit",
-		"unsloth/Qwen3-32B-unsloth-bnb-4bit",
-
-		# 4bit dynamic quants for superior accuracy and low memory use
 		"unsloth/gemma-3-12b-it-unsloth-bnb-4bit",
-		"unsloth/Phi-4",
-		"unsloth/Llama-3.1-8B",
-		"unsloth/Llama-3.2-3B",
-		"unsloth/orpheus-3b-0.1-ft-unsloth-bnb-4bit" # [NEW] We support TTS models!
-	] # More models at https://huggingface.co/unsloth
+		"unsloth/gemma-3-4b-it-unsloth-bnb-4bit"
+	] 
 
 	selected_model = "unsloth/gemma-3-4b-it-unsloth-bnb-4bit"
 	if args.tuning:
@@ -162,9 +152,9 @@ if __name__ == '__main__':
 	users = listUser[args.shard::args.num_shards]
 
 	if args.tuning:
-		user_profile_path = f'./data/{args.dataset}/batch_tuning{args.LLM}_usr_prf_{args.shard}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}.json'
+		user_profile_path = f'./data/{args.dataset}/batch_tuning_usr_prf_{args.shard}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}.json'
 	else:
-		user_profile_path = f'./data/{args.dataset}/batch_{args.LLM}_usr_prf_{args.shard}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}.json'
+		user_profile_path = f'./data/{args.dataset}/batch_usr_prf_{args.shard}_candidate_{args.prompt_candidate}_profile_{args.prompt_profile}.json'
 	if os.path.exists(user_profile_path):
 		with open(user_profile_path, 'r', encoding='utf-8') as f:
 			user_profiles = json.load(f)
